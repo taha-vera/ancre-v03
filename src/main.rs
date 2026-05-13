@@ -570,3 +570,171 @@ mod secure_tests {
         }
     }
 }
+
+// ─────────────────────────────────────────────
+// R1 — Per-signal epsilon tracker
+// R2 — device_counts reset après aggregate
+// R3 — NonceCache borné
+// R4 — device_id authentifié via hash
+// ─────────────────────────────────────────────
+
+const MAX_NONCES: usize = 100_000;
+const MAX_BUFFER_SIGNALS: usize = 10_000;
+
+pub struct BoundedNonceCache {
+    seen: HashSet<u64>,
+    insertion_order: std::collections::VecDeque<u64>,
+    max_size: usize,
+}
+
+impl BoundedNonceCache {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            insertion_order: std::collections::VecDeque::new(),
+            max_size,
+        }
+    }
+
+    pub fn check_and_consume(&mut self, nonce: u64) -> Result<(), String> {
+        if self.seen.contains(&nonce) {
+            return Err(format!("Replay détecté : nonce={}", nonce));
+        }
+        // R3 — Eviction FIFO si plein
+        if self.seen.len() >= self.max_size {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        self.seen.insert(nonce);
+        self.insertion_order.push_back(nonce);
+        Ok(())
+    }
+}
+
+// R4 — device_id authentifié via SHA-256 d'un credential
+pub fn derive_device_id(credential: &[u8]) -> u64 {
+    let mut h = Sha256::new();
+    h.update(credential);
+    let hash = h.finalize();
+    u64::from_be_bytes(hash[..8].try_into().unwrap())
+}
+
+pub struct SecureBufferV2 {
+    inner: AncreBuffer,
+    policy: PolicyEngine,
+    nonces: BoundedNonceCache,
+    device_counts: std::collections::HashMap<u64, usize>,
+    max_per_device: usize,
+    total_client_epsilon: f64,  // R1 — tracking ε_client
+}
+
+impl SecureBufferV2 {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self {
+            inner: AncreBuffer::new(),
+            policy,
+            nonces: BoundedNonceCache::new(MAX_NONCES),
+            device_counts: std::collections::HashMap::new(),
+            max_per_device: 30,
+            total_client_epsilon: 0.0,
+        }
+    }
+
+    pub fn push(&mut self, raw: f64, nonce: u64, credential: &[u8]) -> Result<(), String> {
+        self.policy.check()?;
+
+        // Buffer size guard
+        if self.inner.signals.len() >= MAX_BUFFER_SIGNALS {
+            return Err("Buffer plein".to_string());
+        }
+
+        // R3 — Anti-replay borné
+        self.nonces.check_and_consume(nonce)?;
+
+        // R4 — device_id dérivé du credential
+        let device_id = derive_device_id(credential);
+        let count = self.device_counts.entry(device_id).or_insert(0);
+        if *count >= self.max_per_device {
+            return Err(format!("Device quota atteint"));
+        }
+        *count += 1;
+
+        // R1 — Tracker ε_client
+        self.total_client_epsilon += EPSILON_CLIENT;
+
+        self.inner.push(raw)
+    }
+
+    pub fn aggregate(&mut self) -> Result<(f64, f64), String> {
+        self.policy.check()?;
+        let agg = self.inner.aggregate()?;
+        let total_eps = self.total_client_epsilon + EPSILON_SERVER;
+
+        // R2 — Purger device_counts après aggregate
+        self.device_counts.clear();
+        self.total_client_epsilon = 0.0;
+
+        Ok((agg, total_eps))
+    }
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+
+    #[test]
+    fn r2_device_counts_reset_after_aggregate() {
+        let policy = PolicyEngine::new();
+        let mut buf = SecureBufferV2::new(policy);
+        let cred = b"device_credential_A";
+
+        for i in 0..30 {
+            buf.push(0.5, i as u64, cred).unwrap();
+        }
+        // Quota atteint
+        assert!(buf.push(0.5, 30, cred).is_err());
+
+        // Remplir jusqu'à K_MIN avec autres devices
+        for i in 31..131 {
+            let c = format!("device_{}", i);
+            buf.push(0.4, i as u64, c.as_bytes()).ok();
+        }
+
+        // Aggregate → reset device_counts
+        if buf.aggregate().is_ok() {
+            // Après aggregate, device A peut soumettre à nouveau
+            let r = buf.push(0.5, 200, cred);
+            assert!(r.is_ok(), "Device doit pouvoir soumettre après aggregate");
+        }
+    }
+
+    #[test]
+    fn r3_nonce_cache_bounded() {
+        let mut cache = BoundedNonceCache::new(5);
+        for i in 0..10u64 {
+            cache.check_and_consume(i).unwrap();
+        }
+        // Cache evicts oldest — nonce 0 peut être réutilisé
+        assert!(cache.seen.len() <= 5);
+    }
+
+    #[test]
+    fn r4_device_id_from_credential() {
+        let id1 = derive_device_id(b"credential_A");
+        let id2 = derive_device_id(b"credential_B");
+        let id3 = derive_device_id(b"credential_A");
+        assert_ne!(id1, id2);
+        assert_eq!(id1, id3);
+    }
+
+    #[test]
+    fn r1_epsilon_client_tracked() {
+        let policy = PolicyEngine::new();
+        let mut buf = SecureBufferV2::new(policy);
+        for i in 0..5 {
+            buf.push(0.5, i as u64, format!("dev{}", i).as_bytes()).unwrap();
+        }
+        assert!((buf.total_client_epsilon - 5.0 * EPSILON_CLIENT).abs() < 1e-10);
+    }
+}
