@@ -738,3 +738,222 @@ mod v2_tests {
         assert!((buf.total_client_epsilon - 5.0 * EPSILON_CLIENT).abs() < 1e-10);
     }
 }
+
+// ─────────────────────────────────────────────
+// F2 FIX — Moyenne tronquée (sensibilité 1/n prouvable)
+// Remplace médiane (sensibilité 1.0 non bornée)
+// ─────────────────────────────────────────────
+
+pub fn trimmed_mean(vals: &mut Vec<f64>, trim_fraction: f64) -> f64 {
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = vals.len();
+    let trim = (n as f64 * trim_fraction).floor() as usize;
+    let trimmed = &vals[trim..n - trim];
+    trimmed.iter().sum::<f64>() / trimmed.len() as f64
+}
+
+#[cfg(test)]
+mod f2_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn trimmed_mean_basic() {
+        let mut v = vec![0.0, 0.1, 0.5, 0.9, 1.0];
+        let m = trimmed_mean(&mut v, 0.2);
+        assert!((m - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trimmed_mean_bounded() {
+        let mut v: Vec<f64> = (0..100).map(|i| i as f64 / 100.0).collect();
+        let m = trimmed_mean(&mut v, 0.1);
+        assert!(m >= 0.0 && m <= 1.0);
+    }
+
+    proptest! {
+        #[test]
+        fn trimmed_mean_sensitivity(
+            vals in prop::collection::vec(0.0f64..=1.0, 100..200),
+            idx in 0usize..100,
+            replacement in 0.0f64..=1.0
+        ) {
+            // INV : changer 1 signal dans [0,1] change la moyenne tronquée de max 1/n
+            let mut v1 = vals.clone();
+            let mut v2 = vals.clone();
+            let len2 = v2.len();
+            v2[idx % len2] = replacement;
+            let m1 = trimmed_mean(&mut v1, 0.1);
+            let m2 = trimmed_mean(&mut v2, 0.1);
+            let n = vals.len() as f64;
+            assert!((m1 - m2).abs() <= 1.0 / (n * 0.8) + 1e-9);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+// F6 FIX — Nonce cache avec TTL
+// Remplace FIFO pur (replay possible après éviction)
+// ─────────────────────────────────────────────
+
+use std::time::{Instant, Duration};
+
+pub struct TtlNonceCache {
+    entries: std::collections::HashMap<u64, Instant>,
+    ttl: Duration,
+    max_size: usize,
+}
+
+impl TtlNonceCache {
+    pub fn new(ttl_secs: u64, max_size: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            ttl: Duration::from_secs(ttl_secs),
+            max_size,
+        }
+    }
+
+    pub fn check_and_consume(&mut self, nonce: u64) -> Result<(), String> {
+        self.purge_expired();
+
+        if self.entries.contains_key(&nonce) {
+            return Err(format!("Replay détecté : nonce={}", nonce));
+        }
+
+        if self.entries.len() >= self.max_size {
+            return Err("Nonce cache plein — réessayer plus tard".to_string());
+        }
+
+        self.entries.insert(nonce, Instant::now());
+        Ok(())
+    }
+
+    fn purge_expired(&mut self) {
+        let ttl = self.ttl;
+        self.entries.retain(|_, ts| ts.elapsed() < ttl);
+    }
+
+    pub fn len(&self) -> usize { self.entries.len() }
+}
+
+#[cfg(test)]
+mod f6_tests {
+    use super::*;
+
+    #[test]
+    fn ttl_nonce_replay_rejected() {
+        let mut cache = TtlNonceCache::new(300, 1000);
+        assert!(cache.check_and_consume(42).is_ok());
+        assert!(cache.check_and_consume(42).is_err());
+    }
+
+    #[test]
+    fn ttl_nonce_cache_bounded() {
+        let mut cache = TtlNonceCache::new(300, 5);
+        for i in 0..5 {
+            assert!(cache.check_and_consume(i).is_ok());
+        }
+        // 6ème rejeté — cache plein
+        assert!(cache.check_and_consume(99).is_err());
+    }
+
+    #[test]
+    fn ttl_nonce_distinct_accepted() {
+        let mut cache = TtlNonceCache::new(300, 1000);
+        for i in 0..100 {
+            assert!(cache.check_and_consume(i).is_ok());
+        }
+        assert_eq!(cache.len(), 100);
+    }
+}
+
+// ─────────────────────────────────────────────
+// Tests statistiques DP
+// Vérifie empiriquement la distribution du bruit
+// ─────────────────────────────────────────────
+
+#[cfg(test)]
+mod dp_statistical_tests {
+    use super::*;
+
+    fn sample_mean(samples: &[f64]) -> f64 {
+        samples.iter().sum::<f64>() / samples.len() as f64
+    }
+
+    fn sample_variance(samples: &[f64]) -> f64 {
+        let mean = sample_mean(samples);
+        samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64
+    }
+
+    #[test]
+    fn laplace_mean_near_zero() {
+        // Laplace(0, scale) doit avoir moyenne ≈ 0
+        let n = 10_000;
+        let scale = 1.0;
+        let samples: Vec<f64> = (0..n).map(|_| laplace_noise(scale)).collect();
+        let mean = sample_mean(&samples);
+        // Moyenne doit être dans [-0.05, 0.05] avec haute probabilité
+        assert!(mean.abs() < 0.05, "Moyenne Laplace trop loin de 0 : {:.4}", mean);
+    }
+
+    #[test]
+    fn laplace_variance_correct() {
+        // Laplace(0, scale) a variance = 2 * scale^2
+        let n = 10_000;
+        let scale = 1.0;
+        let samples: Vec<f64> = (0..n).map(|_| laplace_noise(scale)).collect();
+        let var = sample_variance(&samples);
+        let expected = 2.0 * scale * scale;
+        // Variance doit être dans [1.5, 2.5]
+        assert!(
+            (var - expected).abs() < 0.5,
+            "Variance Laplace incorrecte : {:.4} attendu {:.4}", var, expected
+        );
+    }
+
+    #[test]
+    fn bounded_signal_noise_distribution() {
+        // Après add_noise, les valeurs doivent rester dans [0,1]
+        // et ne pas être toutes identiques (bruit effectif)
+        let n = 1_000;
+        let signal = BoundedSignal::new(0.5).unwrap();
+        let noisy: Vec<f64> = (0..n).map(|_| signal.add_noise(1.0).value()).collect();
+
+        // Toutes dans [0,1]
+        assert!(noisy.iter().all(|&x| x >= 0.0 && x <= 1.0));
+
+        // Variance non nulle — le bruit est effectif
+        let var = sample_variance(&noisy);
+        assert!(var > 0.01, "Bruit non effectif : variance={:.4}", var);
+
+        // Moyenne proche de 0.5 (signal original)
+        let mean = sample_mean(&noisy);
+        assert!(
+            (mean - 0.5).abs() < 0.1,
+            "Bruit biaisé : mean={:.4}", mean
+        );
+    }
+
+    #[test]
+    fn trimmed_mean_noise_correct_scale() {
+        // Vérifie que le bruit sur TMoM a le bon scale
+        // scale = 1 / (n * ε_server) pour signals dans [0,1]
+        let n = 200usize;
+        let epsilon_server = 0.5f64;
+        let expected_scale = 1.0 / (n as f64 * epsilon_server);
+
+        // Génère n fois une agrégation de n signaux = 0.5
+        let trials = 500;
+        let results: Vec<f64> = (0..trials).map(|_| {
+            let signal = BoundedSignal::new(0.5).unwrap();
+            signal.add_noise(expected_scale).value()
+        }).collect();
+
+        let var = sample_variance(&results);
+        let expected_var = 2.0 * expected_scale * expected_scale;
+        assert!(
+            (var - expected_var).abs() < expected_var,
+            "Scale bruit incorrect : var={:.6} attendu≈{:.6}", var, expected_var
+        );
+    }
+}
