@@ -1,9 +1,12 @@
-use rand::random;
+
 
 
 fn laplace_noise(scale: f64) -> f64 {
-    let u: f64 = random::<f64>() - 0.5;
-    -scale * u.signum() * (1.0 - 2.0 * u.abs()).ln()
+    use rand::rngs::OsRng;
+    use rand::Rng;
+    let u: f64 = OsRng.gen::<f64>() - 0.5;
+    let safe = (1.0 - 2.0 * u.abs()).max(1e-15);
+    -scale * u.signum() * safe.ln()
 }
 
 #[derive(Debug, Clone)]
@@ -307,7 +310,7 @@ impl AuditChain {
         h.update(aggregate.to_bits().to_be_bytes());
         h.update(k.to_be_bytes());
         h.update(epsilon.to_bits().to_be_bytes());
-        let hash = hex::encode(&h.finalize()[..16]);
+        let hash = hex::encode(h.finalize().as_slice());
         self.prev_hash = hash.clone();
         self.entries.push(format!(
             "agg={:.4} k={} ε={:.2} hash={}",
@@ -472,4 +475,98 @@ fn run_pipeline() {
 
     println!("\n📊 {}", metrics.report());
     println!("🔗 Audit entries : {}", chain.len());
+}
+
+// ─────────────────────────────────────────────
+// P3 — Anti-replay nonce
+// ─────────────────────────────────────────────
+
+use std::collections::HashSet;
+
+pub struct NonceCache {
+    seen: HashSet<u64>,
+}
+
+impl NonceCache {
+    pub fn new() -> Self {
+        Self { seen: HashSet::new() }
+    }
+
+    pub fn check_and_consume(&mut self, nonce: u64) -> Result<(), String> {
+        if self.seen.contains(&nonce) {
+            return Err(format!("Replay détecté : nonce={}", nonce));
+        }
+        self.seen.insert(nonce);
+        Ok(())
+    }
+}
+
+pub struct SecureBuffer {
+    inner: AncreBuffer,
+    policy: PolicyEngine,
+    nonces: NonceCache,
+    device_counts: std::collections::HashMap<u64, usize>,
+    max_per_device: usize,
+}
+
+impl SecureBuffer {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self {
+            inner: AncreBuffer::new(),
+            policy,
+            nonces: NonceCache::new(),
+            device_counts: std::collections::HashMap::new(),
+            max_per_device: 30,
+        }
+    }
+
+    pub fn push(&mut self, raw: f64, nonce: u64, device_id: u64) -> Result<(), String> {
+        self.policy.check()?;
+        self.nonces.check_and_consume(nonce)?;
+
+        // P4 — Coalition cap par identité
+        let count = self.device_counts.entry(device_id).or_insert(0);
+        if *count >= self.max_per_device {
+            return Err(format!("Device {} : quota atteint", device_id));
+        }
+        *count += 1;
+
+        self.inner.push(raw)
+    }
+
+    pub fn aggregate(&mut self) -> Result<f64, String> {
+        self.policy.check()?;
+        self.inner.aggregate()
+    }
+}
+
+#[cfg(test)]
+mod secure_tests {
+    use super::*;
+
+    #[test]
+    fn replay_rejected() {
+        let mut cache = NonceCache::new();
+        assert!(cache.check_and_consume(42).is_ok());
+        assert!(cache.check_and_consume(42).is_err());
+    }
+
+    #[test]
+    fn device_quota_enforced() {
+        let policy = PolicyEngine::new();
+        let mut buf = SecureBuffer::new(policy);
+        for i in 0..30 {
+            assert!(buf.push(0.5, i as u64, 999).is_ok());
+        }
+        assert!(buf.push(0.5, 31, 999).is_err());
+    }
+
+    #[test]
+    fn different_devices_accepted() {
+        let policy = PolicyEngine::new();
+        let mut buf = SecureBuffer::new(policy);
+        for i in 0..60 {
+            assert!(buf.push(0.5, i as u64, i as u64).is_ok());
+        }
+    }
 }
