@@ -1,5 +1,6 @@
 use rand::rngs::OsRng;
 use rand::Rng;
+use rand::RngCore;
 use sha2::{Sha256, Digest};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1062,5 +1063,160 @@ mod q12_tests {
         let mut c1 = AuthAuditChain::new(b"key1");
         let mut c2 = AuthAuditChain::new(b"key2");
         assert_ne!(c1.append(0.5, 100, 0.5), c2.append(0.5, 100, 0.5));
+    }
+}
+
+// ─────────────────────────────────────────────
+// ANCRE v0.6 — PATCH 1 : SecureRng ChaCha20
+// ─────────────────────────────────────────────
+
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+
+pub struct SecureRng(ChaCha20Rng);
+
+impl SecureRng {
+    pub fn new() -> Self {
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        SecureRng(ChaCha20Rng::from_seed(seed))
+    }
+}
+
+impl rand::RngCore for SecureRng {
+    fn next_u32(&mut self) -> u32 { self.0.next_u32() }
+    fn next_u64(&mut self) -> u64 { self.0.next_u64() }
+    fn fill_bytes(&mut self, dest: &mut [u8]) { self.0.fill_bytes(dest) }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.0.try_fill_bytes(dest)
+    }
+}
+
+#[cfg(test)]
+mod v06_patch1_tests {
+    use super::*;
+    use rand::RngCore;
+
+    #[test]
+    fn chacha20_not_constant() {
+        let mut rng = SecureRng::new();
+        let v1 = rng.next_u64();
+        let v2 = rng.next_u64();
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn chacha20_two_instances_independent() {
+        let mut r1 = SecureRng::new();
+        let mut r2 = SecureRng::new();
+        let s1: Vec<u64> = (0..10).map(|_| r1.next_u64()).collect();
+        let s2: Vec<u64> = (0..10).map(|_| r2.next_u64()).collect();
+        assert_ne!(s1, s2);
+    }
+}
+
+
+// ─────────────────────────────────────────────
+// ANCRE v0.6 — PATCH 3 : delta_bound() Mironov 2012
+// Quantifie la fuite LSB en (ε,δ)-DP
+// δ ≤ (e^ε - 1) × 2^-52 / (2 × scale)
+// Pour n=100, ε=0.5, scale≈0.025 → δ ≈ 2.9e-15
+// ─────────────────────────────────────────────
+
+const MACHINE_EPSILON: f64 = 2.220446049250313e-16; // 2^-52
+
+pub fn delta_bound(epsilon: f64, scale: f64) -> f64 {
+    if scale <= 0.0 || !scale.is_finite() { return 1.0; }
+    (epsilon.exp() - 1.0) * MACHINE_EPSILON / (2.0 * scale)
+}
+
+#[cfg(test)]
+mod v06_patch3_tests {
+    use super::*;
+
+    #[test]
+    fn delta_bound_n100() {
+        let scale = (1.0_f64 / 80.0) / EPSILON_SERVER;
+        let delta = delta_bound(EPSILON_SERVER, scale);
+        assert!(delta < 1e-14, "delta={:.2e}", delta);
+        assert!(delta > 0.0);
+    }
+
+    #[test]
+    fn delta_increases_with_epsilon() {
+        let scale = 0.025;
+        assert!(delta_bound(1.0, scale) > delta_bound(0.5, scale));
+    }
+
+    #[test]
+    fn delta_invalid_scale() {
+        assert_eq!(delta_bound(0.5, 0.0), 1.0);
+        assert_eq!(delta_bound(0.5, -1.0), 1.0);
+    }
+}
+
+// ─────────────────────────────────────────────
+// ANCRE v0.6 — FIX : SessionGuard
+// Invalide le credential après épuisement du budget
+// Corrige le loophole reset_session() du v4.1.0
+// ─────────────────────────────────────────────
+
+pub struct SessionGuard {
+    aggregation_count: u32,
+    max_aggregations: u32,
+    invalidated: bool,
+}
+
+impl SessionGuard {
+    pub fn new(max_agg: u32) -> Self {
+        Self { aggregation_count: 0, max_aggregations: max_agg, invalidated: false }
+    }
+
+    pub fn record_aggregation(&mut self) -> Result<(), String> {
+        if self.invalidated {
+            return Err("Session invalidee — nouveau credential requis".to_string());
+        }
+        if self.aggregation_count >= self.max_aggregations {
+            self.invalidated = true;
+            return Err(format!("Budget epuise : {}/{} — credential invalide",
+                self.aggregation_count, self.max_aggregations));
+        }
+        self.aggregation_count += 1;
+        Ok(())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.invalidated && self.aggregation_count < self.max_aggregations
+    }
+}
+
+#[cfg(test)]
+mod v06_fix_session_tests {
+    use super::*;
+
+    #[test]
+    fn session_invalidated_after_exhaustion() {
+        let mut s = SessionGuard::new(3);
+        assert!(s.record_aggregation().is_ok());
+        assert!(s.record_aggregation().is_ok());
+        assert!(s.record_aggregation().is_ok());
+        assert!(s.record_aggregation().is_err());
+        assert!(!s.is_valid());
+        assert!(s.record_aggregation().is_err());
+    }
+
+    #[test]
+    fn new_session_is_valid() {
+        let s = SessionGuard::new(3);
+        assert!(s.is_valid());
+    }
+
+    #[test]
+    fn no_reset_loophole() {
+        let mut s = SessionGuard::new(3);
+        for _ in 0..3 { s.record_aggregation().ok(); }
+        assert!(!s.is_valid());
+        // Impossible de réutiliser — pas de reset
+        assert!(s.record_aggregation().is_err());
     }
 }
