@@ -25,7 +25,7 @@ const TRIM_FRACTION: f64 = 0.1;
 fn laplace_noise(scale: f64) -> f64 {
     let u: f64 = {
         let mut v = OsRng.gen::<f64>() - 0.5;
-        while v == -0.5 { v = OsRng.gen::<f64>() - 0.5; }
+        while v == -0.5 || v == 0.0 { v = OsRng.gen::<f64>() - 0.5; }
         v
     };
     let safe = (1.0 - 2.0 * u.abs()).max(f64::MIN_POSITIVE);
