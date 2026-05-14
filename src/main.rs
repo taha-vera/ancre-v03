@@ -1430,3 +1430,60 @@ mod v07_fuzzing {
         assert!(r >= 0.0 && r <= 1.0);
     }
 }
+// AncreParams — paramètres configurables
+pub struct AncreParams {
+    pub alpha: f64,
+    pub epsilon: f64,
+    pub min_n: usize,
+}
+
+impl AncreParams {
+    pub fn default_ancre() -> Self {
+        Self {
+            alpha: TRIM_FRACTION,
+            epsilon: EPSILON_SERVER,
+            min_n: K_MIN,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.alpha > 0.0
+            && self.alpha < 0.5
+            && self.epsilon > 0.0
+            && self.min_n > 0
+    }
+
+    pub fn delta_max(&self) -> f64 {
+        1.0 / ((1.0 - 2.0 * self.alpha) * self.min_n as f64)
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.delta_max() / self.epsilon
+    }
+}
+
+#[cfg(test)]
+mod ancre_params_tests {
+    use super::*;
+
+    #[test]
+    fn default_params_valid() {
+        let p = AncreParams::default_ancre();
+        assert!(p.is_valid());
+        assert_eq!(p.min_n, K_MIN);
+        assert_eq!(p.epsilon, EPSILON_SERVER);
+    }
+
+    #[test]
+    fn delta_max_n100() {
+        let p = AncreParams::default_ancre();
+        let expected = 1.0 / (0.8 * 100.0);
+        assert!((p.delta_max() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn scale_n100() {
+        let p = AncreParams::default_ancre();
+        assert!((p.scale() - 0.025).abs() < 1e-10);
+    }
+}
