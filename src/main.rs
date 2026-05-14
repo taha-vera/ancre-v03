@@ -894,3 +894,43 @@ mod empirical_dp_tests {
         );
     }
 }
+
+// ─────────────────────────────────────────────
+// HMAC — AuditChain authentifiée
+// ─────────────────────────────────────────────
+
+use sha2::Sha256 as HmacSha256;
+use hmac::{Hmac, Mac};
+
+type HmacType = Hmac<HmacSha256>;
+
+pub struct AuthAuditChain {
+    prev_hash: String,
+    hmac_key: Vec<u8>,
+    entries: Vec<String>,
+}
+
+impl AuthAuditChain {
+    pub fn new(key: &[u8]) -> Self {
+        Self {
+            prev_hash: "genesis".to_string(),
+            hmac_key: key.to_vec(),
+            entries: Vec::new(),
+        }
+    }
+    pub fn append(&mut self, aggregate: f64, k: usize, epsilon: f64) -> String {
+        let mut mac = HmacType::new_from_slice(&self.hmac_key)
+            .expect("HMAC init");
+        mac.update(self.prev_hash.as_bytes());
+        mac.update(&aggregate.to_bits().to_be_bytes());
+        mac.update(&k.to_be_bytes());
+        mac.update(&epsilon.to_bits().to_be_bytes());
+        let hash = hex::encode(mac.finalize().into_bytes());
+        self.prev_hash = hash.clone();
+        self.entries.push(format!(
+            "agg={:.4} k={} e={:.2} hmac={}", aggregate, k, epsilon, &hash[..16]
+        ));
+        hash
+    }
+    pub fn len(&self) -> usize { self.entries.len() }
+}

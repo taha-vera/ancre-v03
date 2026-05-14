@@ -12,6 +12,7 @@ rand = "0.8"
 rand_distr = "0.4"
 sha2 = "0.10"
 hex = "0.4"
+hmac = "0.12"
 
 [dev-dependencies]
 proptest = "1.0"
