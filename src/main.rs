@@ -153,7 +153,7 @@ impl AncreBuffer {
         self.budget.spend(EPSILON_SERVER)?;
 
         // Bruit Laplace Central DP
-        let noisy = (mean + laplace_noise(scale)).clamp(0.0, 1.0);
+        let noisy = (mean + laplace_noise_v07(scale, &mut SecureRng::new())).clamp(0.0, 1.0);
         self.signals.clear();
         Ok(noisy)
     }
