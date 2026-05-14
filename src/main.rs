@@ -698,3 +698,199 @@ fn main() {
     println!("\n{}", metrics.report());
     println!("Audit chain: {} entrees", chain.len());
 }
+
+// ─────────────────────────────────────────────
+// Q10 FIX — EpsilonBudget entiers
+// Remplace f64 (erreurs d'arrondi) par u64
+// 1.0 epsilon = 1_000_000 micro-epsilon
+// ─────────────────────────────────────────────
+
+const MICRO: u64 = 1_000_000;
+
+pub struct EpsilonBudgetExact {
+    epsilon_max: u64,
+    epsilon_used: u64,
+}
+
+impl EpsilonBudgetExact {
+    pub fn new(max: f64) -> Self {
+        Self {
+            epsilon_max: (max * MICRO as f64) as u64,
+            epsilon_used: 0,
+        }
+    }
+    pub fn spend(&mut self, amount: f64) -> Result<(), String> {
+        let amount_u = (amount * MICRO as f64) as u64;
+        if amount_u == 0 {
+            return Err("amount invalide".to_string());
+        }
+        if self.epsilon_used + amount_u > self.epsilon_max {
+            return Err(format!("Budget epuise : {}/{}",
+                self.epsilon_used, self.epsilon_max));
+        }
+        self.epsilon_used += amount_u;
+        Ok(())
+    }
+    pub fn remaining_f64(&self) -> f64 {
+        (self.epsilon_max - self.epsilon_used) as f64 / MICRO as f64
+    }
+    pub fn is_exhausted(&self) -> bool {
+        self.epsilon_used >= self.epsilon_max
+    }
+}
+
+#[cfg(test)]
+mod exact_budget_tests {
+    use super::*;
+
+    #[test]
+    fn exact_3_aggregations() {
+        let mut b = EpsilonBudgetExact::new(1.5);
+        assert!(b.spend(0.5).is_ok());
+        assert!(b.spend(0.5).is_ok());
+        assert!(b.spend(0.5).is_ok());
+        assert!(b.spend(0.5).is_err());
+        assert!(b.is_exhausted());
+    }
+
+    #[test]
+    fn exact_no_float_drift() {
+        let mut b = EpsilonBudgetExact::new(1.5);
+        for _ in 0..1500 { b.spend(0.001).ok(); }
+        assert!(b.is_exhausted(),
+            "Budget doit etre epuise apres 1500 x 0.001");
+    }
+
+    #[test]
+    fn exact_remaining_correct() {
+        let mut b = EpsilonBudgetExact::new(1.5);
+        b.spend(0.5).unwrap();
+        let r = b.remaining_f64();
+        assert!((r - 1.0).abs() < 1e-6, "remaining={:.6}", r);
+    }
+}
+
+// ─────────────────────────────────────────────
+// Q13 — 3 nouveaux proptest DP
+// ─────────────────────────────────────────────
+
+#[cfg(test)]
+mod dp_proptest_q13 {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Test 1 — Sensibilité TMoM cas pathologiques
+    proptest! {
+        #[test]
+        fn prop_tmom_sensitivity_pathological(
+            n in K_MIN..200usize,
+            idx in 0usize..K_MIN,
+            new_val in 0.0f64..=1.0,
+        ) {
+            let mut v1: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
+            let mut v2 = v1.clone();
+            v2[idx % n] = new_val;
+            let m1 = trimmed_mean(&mut v1, TRIM_FRACTION);
+            let m2 = trimmed_mean(&mut v2, TRIM_FRACTION);
+            let max_s = 1.0 / (n as f64 * (1.0 - 2.0 * TRIM_FRACTION)) + 1e-9;
+            prop_assert!((m1 - m2).abs() <= max_s,
+                "sensitivity={:.8} max={:.8}", (m1-m2).abs(), max_s);
+        }
+
+        // Test 2 — Biais clamping borné
+        #[test]
+        fn prop_clamping_bias_bounded(
+            mean in 0.1f64..0.9,
+            scale in 0.001f64..0.1,
+        ) {
+            let n = 1_000;
+            let sum: f64 = (0..n)
+                .map(|_| (mean + laplace_noise(scale)).clamp(0.0, 1.0))
+                .sum();
+            let empirical = sum / n as f64;
+            prop_assert!((empirical - mean).abs() < 3.0 * scale,
+                "Biais: mean={:.4} empirical={:.4} scale={:.4}",
+                mean, empirical, scale);
+        }
+
+        // Test 3 — Budget exact monotone
+        #[test]
+        fn prop_exact_budget_monotone(
+            amounts in prop::collection::vec(0.001f64..0.1, 1..20)
+        ) {
+            let mut b = EpsilonBudgetExact::new(10.0);
+            let mut prev = 0u64;
+            for amount in amounts {
+                if b.spend(amount).is_ok() {
+                    assert!(b.epsilon_used >= prev);
+                    prev = b.epsilon_used;
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+// Q14 — Test empirique DP
+// Vérifie que le mécanisme est bien ε-DP
+// Protocole : ratio Pr[M(D)] / Pr[M(D')] ≤ e^ε
+// ─────────────────────────────────────────────
+
+#[cfg(test)]
+mod empirical_dp_tests {
+    use super::*;
+
+    fn empirical_dp_check(epsilon: f64, n_trials: usize, n_signals: usize, delta: f64) -> bool {
+        let bins = 50usize;
+        let mut hist_d = vec![0u64; bins];
+        let mut hist_d_prime = vec![0u64; bins];
+
+        for _ in 0..n_trials {
+            // Dataset D : tous 0.5
+            let mut buf_d = AncreBuffer::new();
+            for _ in 0..n_signals { buf_d.push(0.5).ok(); }
+            if let Ok(agg) = buf_d.aggregate() {
+                let bin = (agg * bins as f64) as usize;
+                hist_d[bin.min(bins - 1)] += 1;
+            }
+
+            // Dataset D' : un signal = 0.5 + delta
+            let mut buf_dp = AncreBuffer::new();
+            for i in 0..n_signals {
+                let v = if i == 0 { (0.5 + delta).clamp(0.0, 1.0) } else { 0.5 };
+                buf_dp.push(v).ok();
+            }
+            if let Ok(agg) = buf_dp.aggregate() {
+                let bin = (agg * bins as f64) as usize;
+                hist_d_prime[bin.min(bins - 1)] += 1;
+            }
+        }
+
+        let max_ratio = epsilon.exp();
+        for i in 0..bins {
+            if hist_d[i] > 10 {
+                let ratio = hist_d_prime[i] as f64 / hist_d[i] as f64;
+                if ratio > max_ratio * 1.2 { // 20% marge statistique
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn empirical_05_dp_small_delta() {
+        assert!(
+            empirical_dp_check(EPSILON_SERVER, 2_000, K_MIN, 0.1),
+            "ANCRE n'est pas {:.1}-DP (delta=0.1)", EPSILON_SERVER
+        );
+    }
+
+    #[test]
+    fn empirical_05_dp_large_delta() {
+        assert!(
+            empirical_dp_check(EPSILON_SERVER, 2_000, K_MIN, 0.5),
+            "ANCRE n'est pas {:.1}-DP (delta=0.5)", EPSILON_SERVER
+        );
+    }
+}
