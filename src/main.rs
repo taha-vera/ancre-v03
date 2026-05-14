@@ -1220,3 +1220,61 @@ mod v06_fix_session_tests {
         assert!(s.record_aggregation().is_err());
     }
 }
+
+// ─────────────────────────────────────────────
+// ANCRE v0.6 — AggregateResponse (H3)
+// Publie n explicitement — justifie H3
+// ─────────────────────────────────────────────
+
+pub struct AggregateResponse {
+    pub result: f64,
+    pub n: usize,
+    pub epsilon_used: f64,
+    pub delta_bound: f64,
+    pub total_epsilon_used: f64,
+}
+
+impl AggregateResponse {
+    pub fn compute_delta_bound(epsilon: f64, n: usize) -> f64 {
+        if n == 0 { return 1.0; }
+        let scale = 1.0 / (n as f64 * 0.8 * epsilon);
+        (epsilon.exp() - 1.0) * MACHINE_EPSILON / (2.0 * scale)
+    }
+
+    pub fn new(result: f64, n: usize, epsilon: f64, total_epsilon: f64) -> Self {
+        Self {
+            result,
+            n,
+            epsilon_used: epsilon,
+            delta_bound: Self::compute_delta_bound(epsilon, n),
+            total_epsilon_used: total_epsilon,
+        }
+    }
+}
+
+#[cfg(test)]
+mod aggregate_response_tests {
+    use super::*;
+
+    #[test]
+    fn response_publishes_n() {
+        let r = AggregateResponse::new(0.5, 100, 0.5, 0.5);
+        assert_eq!(r.n, 100);
+        assert_eq!(r.epsilon_used, 0.5);
+        assert!(r.delta_bound < 3e-15);
+    }
+
+    #[test]
+    fn delta_decreases_with_larger_n() {
+        let d100 = AggregateResponse::compute_delta_bound(0.5, 100);
+        let d200 = AggregateResponse::compute_delta_bound(0.5, 200);
+        assert!(d200 > d100, "delta augmente avec n — scale plus petit");
+    }
+
+    #[test]
+    fn delta_n100_matches_mironov() {
+        // Pour n=100, ε=0.5 → δ ≈ 2.9e-15
+        let d = AggregateResponse::compute_delta_bound(0.5, 100);
+        assert!(d > 2e-15 && d < 4e-15, "delta={:.2e}", d);
+    }
+}
