@@ -885,7 +885,7 @@ mod empirical_dp_tests {
     #[test]
     fn empirical_05_dp_small_delta() {
         assert!(
-            empirical_dp_check(EPSILON_SERVER, 2_000, K_MIN, 0.1),
+            empirical_dp_check(EPSILON_SERVER, 10_000, K_MIN, 0.1),
             "ANCRE n'est pas {:.1}-DP (delta=0.1)", EPSILON_SERVER
         );
     }
@@ -893,7 +893,7 @@ mod empirical_dp_tests {
     #[test]
     fn empirical_05_dp_large_delta() {
         assert!(
-            empirical_dp_check(EPSILON_SERVER, 2_000, K_MIN, 0.5),
+            empirical_dp_check(EPSILON_SERVER, 10_000, K_MIN, 0.5),
             "ANCRE n'est pas {:.1}-DP (delta=0.5)", EPSILON_SERVER
         );
     }
@@ -937,4 +937,128 @@ impl AuthAuditChain {
         hash
     }
     pub fn len(&self) -> usize { self.entries.len() }
+}
+
+// ─────────────────────────────────────────────
+// Q10 FIX — SecureBufferV2 avec sauvegarde état
+// ─────────────────────────────────────────────
+
+impl SecureBufferV2 {
+    pub fn aggregate_safe(&mut self) -> Result<(f64, f64, usize), String> {
+        self.policy.check()?;
+
+        // Sauvegarder l'état avant modification
+        let saved_counts = self.device_counts.clone();
+        let saved_salt = self.session_salt;
+
+        // Reset session
+        self.device_counts.clear();
+        self.session_salt = OsRng.gen::<u64>();
+
+        // Agrégation — restaurer si échec
+        match self.inner.aggregate() {
+            Ok(agg) => {
+                let eps_used = self.inner.budget_used();
+                self.aggregation_count += 1;
+                Ok((agg, eps_used, self.aggregation_count))
+            }
+            Err(e) => {
+                // Restaurer l'état
+                self.device_counts = saved_counts;
+                self.session_salt = saved_salt;
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod q10_tests {
+    use super::*;
+
+    #[test]
+    fn q10_state_restored_on_aggregate_fail() {
+        let policy = PolicyEngine::new();
+        let mut buf = SecureBufferV2::new(policy);
+        let cred = b"device_A";
+
+        // Push 5 signaux — quota device_A = 5
+        for i in 0..5 {
+            buf.push(0.5, i as u64, cred).unwrap();
+        }
+
+        let salt_before = buf.session_salt;
+
+        // aggregate_safe() échoue — K < K_MIN
+        let result = buf.aggregate_safe();
+        assert!(result.is_err());
+
+        // État restauré — session_salt inchangé
+        assert_eq!(buf.session_salt, salt_before,
+            "session_salt doit etre restaure apres echec");
+
+        // device_A peut encore soumettre
+        assert!(buf.push(0.5, 99, cred).is_ok(),
+            "device_A doit pouvoir soumettre apres echec aggregate");
+    }
+
+    #[test]
+    fn q10_state_cleared_on_success() {
+        let policy = PolicyEngine::new();
+        let mut buf = SecureBufferV2::new(policy);
+
+        for session in 0..1 {
+            for i in 0..120 {
+                let cred = format!("dev_{}_{}", session, i);
+                buf.push(0.5, session * 1000 + i as u64, cred.as_bytes()).ok();
+            }
+        }
+
+        let result = buf.aggregate_safe();
+        assert!(result.is_ok());
+
+        // device_counts doit etre vide apres succès
+        assert_eq!(buf.device_counts.len(), 0,
+            "device_counts doit etre vide apres succes");
+    }
+}
+
+#[cfg(test)]
+mod q12_tests {
+    use super::*;
+
+    #[test]
+    fn auth_audit_chain_same_input_same_hmac() {
+        let key = b"vera-ancre-secret-key-2026";
+        let mut c1 = AuthAuditChain::new(key);
+        let mut c2 = AuthAuditChain::new(key);
+        assert_eq!(c1.append(0.5, 100, 0.5), c2.append(0.5, 100, 0.5));
+    }
+
+    #[test]
+    fn auth_audit_chain_diff_input_diff_hmac() {
+        let key = b"vera-ancre-secret-key-2026";
+        let mut c1 = AuthAuditChain::new(key);
+        let mut c2 = AuthAuditChain::new(key);
+        let h1 = c1.append(0.6, 100, 0.5);
+        let h2 = c2.append(0.7, 100, 0.5);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn auth_audit_chain_tamper_detected() {
+        let key = b"vera-ancre-secret-key-2026";
+        let mut c1 = AuthAuditChain::new(key);
+        let mut c2 = AuthAuditChain::new(key);
+        c1.append(0.5, 100, 0.5);
+        c2.append(0.9, 100, 0.5);
+        assert_ne!(c1.append(0.6, 100, 0.5), c2.append(0.6, 100, 0.5));
+    }
+
+    #[test]
+    fn auth_audit_chain_wrong_key_rejected() {
+        let mut c1 = AuthAuditChain::new(b"key1");
+        let mut c2 = AuthAuditChain::new(b"key2");
+        assert_ne!(c1.append(0.5, 100, 0.5), c2.append(0.5, 100, 0.5));
+    }
 }
