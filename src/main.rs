@@ -146,7 +146,9 @@ impl AncreBuffer {
         let sensitivity = 1.0 / k_eff;
         let scale = sensitivity / EPSILON_SERVER;
 
-        // Depense du budget AVANT de vider le buffer
+        // Depense du budget APRES le check K_MIN
+        // Si K < K_MIN, on retourne Err AVANT cette ligne → budget intact
+        // Si spend() echoue → budget non consomme (Err sans mutation)
         self.budget.spend(EPSILON_SERVER)?;
 
         // Bruit Laplace Central DP
