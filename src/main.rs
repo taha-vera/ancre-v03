@@ -23,7 +23,11 @@ const TRIM_FRACTION: f64 = 0.1;
 // ─────────────────────────────────────────────
 
 fn laplace_noise(scale: f64) -> f64 {
-    let u: f64 = OsRng.gen::<f64>() - 0.5;
+    let u: f64 = {
+        let mut v = OsRng.gen::<f64>() - 0.5;
+        while v == -0.5 { v = OsRng.gen::<f64>() - 0.5; }
+        v
+    };
     let safe = (1.0 - 2.0 * u.abs()).max(f64::MIN_POSITIVE);
     // F_new1 FIX : eviter signum(0.0) = 0 en IEEE 754
     let sign = if u >= 0.0 { 1.0_f64 } else { -1.0_f64 };
@@ -720,7 +724,7 @@ impl EpsilonBudgetExact {
         }
     }
     pub fn spend(&mut self, amount: f64) -> Result<(), String> {
-        let amount_u = (amount * MICRO as f64) as u64;
+        let amount_u = (amount * MICRO as f64).round() as u64;
         if amount_u == 0 {
             return Err("amount invalide".to_string());
         }
