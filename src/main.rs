@@ -1391,3 +1391,42 @@ mod v07_ks_tests {
             "KS stat={:.4} > seuil={:.4}", max_diff, ks_threshold);
     }
 }
+
+#[cfg(test)]
+
+#[cfg(test)]
+mod v07_fuzzing {
+    use super::*;
+
+    #[test]
+    fn fuzz_extreme_scales() {
+        let mut rng = SecureRng::new();
+        for scale in [1e-6, 1e-3, 0.025, 0.1, 1.0, 10.0, 100.0] {
+            let noise = laplace_noise_v07(scale, &mut rng);
+            assert!(noise.is_finite(), "scale={} non-fini", scale);
+        }
+    }
+
+    #[test]
+    fn fuzz_k_min_boundary() {
+        let mut buf = AncreBuffer::new();
+        for _ in 0..K_MIN { buf.push(0.5).ok(); }
+        assert!(buf.aggregate().is_ok());
+    }
+
+    #[test]
+    fn fuzz_all_zeros() {
+        let mut buf = AncreBuffer::new();
+        for _ in 0..120 { buf.push(0.0).ok(); }
+        let r = buf.aggregate().unwrap();
+        assert!(r >= 0.0 && r <= 1.0);
+    }
+
+    #[test]
+    fn fuzz_all_ones() {
+        let mut buf = AncreBuffer::new();
+        for _ in 0..120 { buf.push(1.0).ok(); }
+        let r = buf.aggregate().unwrap();
+        assert!(r >= 0.0 && r <= 1.0);
+    }
+}
