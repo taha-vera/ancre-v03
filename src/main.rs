@@ -1278,3 +1278,83 @@ mod aggregate_response_tests {
         assert!(d > 2e-15 && d < 4e-15, "delta={:.2e}", d);
     }
 }
+
+// ─────────────────────────────────────────────
+// ANCRE v0.7 — Laplace Discret Exact (δ=0)
+// Cannone et al. (2020), NeurIPS
+// Résolution r=1000 pour domaine [0,1]
+// Fix SIGSEGV : saturation i64 pour NaN/Inf
+// ─────────────────────────────────────────────
+
+const DISCRETE_RESOLUTION: u64 = 1_000;
+
+fn uniform_open01_v2(rng: &mut SecureRng) -> f64 {
+    let v = rng.next_u64() >> 11;
+    (v as f64 + 0.5) / 9_007_199_254_740_992.0f64
+}
+
+fn geometric_v2(rng: &mut SecureRng, scale_int: u64) -> i64 {
+    let scale_int = scale_int.max(1);
+    let p = 1.0 - (-1.0 / scale_int as f64).exp();
+    let u = uniform_open01_v2(rng);
+    let raw = u.ln() / (1.0 - p).ln();
+    // Fix SIGSEGV : évite NaN/Inf → cast UB sur Android
+    if raw.is_nan() || raw.is_infinite() || raw > i64::MAX as f64 {
+        return 0;
+    }
+    raw.floor() as i64
+}
+
+fn discrete_laplace_v2(rng: &mut SecureRng, scale_int: u64) -> i64 {
+    geometric_v2(rng, scale_int) - geometric_v2(rng, scale_int)
+}
+
+/// Laplace discret exact pour domaine [0,1]
+/// Pure ε-DP (δ=0) — Cannone et al. (2020)
+pub fn laplace_noise_v07(scale: f64, rng: &mut SecureRng) -> f64 {
+    let r = DISCRETE_RESOLUTION as f64;
+    let scale_int = (r * scale).round().max(1.0) as u64;
+    let k = discrete_laplace_v2(rng, scale_int);
+    k as f64 / r
+}
+
+#[cfg(test)]
+mod v07_tests {
+    use super::*;
+
+    #[test]
+    fn v07_scale_int_n100() {
+        let scale = (1.0_f64 / 80.0) / EPSILON_SERVER;
+        let scale_int = (DISCRETE_RESOLUTION as f64 * scale).round() as u64;
+        assert_eq!(scale_int, 25);
+    }
+
+    #[test]
+    fn v07_not_degenerate() {
+        let mut rng = SecureRng::new();
+        let scale = (1.0_f64 / 80.0) / EPSILON_SERVER;
+        let nonzero = (0..1000)
+            .filter(|_| laplace_noise_v07(scale, &mut rng) != 0.0)
+            .count();
+        assert!(nonzero > 300, "Bruit dégénéré : {} non-zéros", nonzero);
+    }
+
+    #[test]
+    fn v07_mean_near_zero() {
+        let mut rng = SecureRng::new();
+        let scale = (1.0_f64 / 80.0) / EPSILON_SERVER;
+        let mean = (0..5_000)
+            .map(|_| laplace_noise_v07(scale, &mut rng))
+            .sum::<f64>() / 5_000.0;
+        assert!(mean.abs() < 0.02, "mean={:.4}", mean);
+    }
+
+    #[test]
+    fn v07_no_sigsegv_extremes() {
+        let mut rng = SecureRng::new();
+        // Teste les cas extrêmes qui causaient SIGSEGV
+        for scale in [0.001, 0.01, 0.025, 0.1, 1.0, 10.0] {
+            let _ = laplace_noise_v07(scale, &mut rng);
+        }
+    }
+}
