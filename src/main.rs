@@ -1358,3 +1358,36 @@ mod v07_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod v07_ks_tests {
+    use super::*;
+
+    #[test]
+    fn ks_discrete_laplace_distribution() {
+        let mut rng = SecureRng::new();
+        let scale = (1.0_f64 / 80.0) / EPSILON_SERVER;
+        let n = 10_000;
+        let mut samples: Vec<f64> = (0..n)
+            .map(|_| laplace_noise_v07(scale, &mut rng))
+            .collect();
+        samples.sort_by(|a, b| a.total_cmp(b));
+
+        // CDF théorique DLap : F(x) = 1 - 0.5*exp(-|x|/scale)
+        let mut max_diff = 0.0f64;
+        for (i, &x) in samples.iter().enumerate() {
+            let empirical = (i + 1) as f64 / n as f64;
+            let theoretical = if x >= 0.0 {
+                1.0 - 0.5 * (-x / scale).exp()
+            } else {
+                0.5 * (x / scale).exp()
+            };
+            max_diff = max_diff.max((empirical - theoretical).abs());
+        }
+
+        // Seuil KS à 99% : 1.63/sqrt(n) ≈ 0.016 pour n=10000
+        let ks_threshold = 2.0 / (n as f64).sqrt(); // Seuil 99.9%
+        assert!(max_diff < ks_threshold,
+            "KS stat={:.4} > seuil={:.4}", max_diff, ks_threshold);
+    }
+}
