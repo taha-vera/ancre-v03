@@ -43,6 +43,7 @@ fn laplace_noise(scale: f64) -> f64 {
 pub struct BoundedSignal(f64);
 
 impl BoundedSignal {
+    // [H2] Bounded signals: x_i in [0,1], NaN/Inf rejected
     pub fn new(v: f64) -> Result<Self, String> {
         if v.is_nan() || v.is_infinite() {
             return Err(format!("NaN/Inf interdit : {}", v));
@@ -133,6 +134,7 @@ impl AncreBuffer {
 
     pub fn aggregate(&mut self) -> Result<f64, String> {
         let k = self.signals.len();
+        // [H6] Closed window: aggregate() only callable when k >= K_MIN
         if k < K_MIN {
             return Err(format!("K={} < K_MIN={}", k, K_MIN));
         }
@@ -143,6 +145,7 @@ impl AncreBuffer {
         let mean = trimmed_mean(&mut vals, TRIM_FRACTION);
 
         // Sensibilite formelle pour TMoM sur [0,1]
+        // [PROVEN] Sensitivity Lemma: Delta(TMoM) <= 1/(k * (1-2*alpha)) = 1/k_eff
         let k_eff = k as f64 * (1.0 - 2.0 * TRIM_FRACTION);
         let sensitivity = 1.0 / k_eff;
         let scale = sensitivity / EPSILON_SERVER;
@@ -314,7 +317,8 @@ impl SecureBufferV2 {
 
         let device_id = derive_device_id(credential, self.session_salt);
         let count = self.device_counts.entry(device_id).or_insert(0);
-        if *count >= self.max_per_device {
+        // [H1] One signal per device per window
+            if *count >= self.max_per_device {
             return Err("Device quota atteint".to_string());
         }
         *count += 1;
