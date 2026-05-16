@@ -109,7 +109,12 @@ pub fn trimmed_mean(vals: &mut Vec<f64>, trim_fraction: f64) -> f64 {
 // Garantie : chaque aggregate() est EPSILON_SERVER-DP
 // ─────────────────────────────────────────────
 
+// [H6] Window lifecycle enforcement
+#[derive(Debug, PartialEq)]
+enum WindowState { Open, Closed, Aggregated }
+
 pub struct AncreBuffer {
+    state: WindowState,
     pub signals: Vec<BoundedSignal>,
     budget: EpsilonBudget,
 }
@@ -118,11 +123,16 @@ impl AncreBuffer {
     pub fn new() -> Self {
         Self {
             signals: Vec::with_capacity(MAX_BUFFER_SIGNALS),
+            state: WindowState::Open,
             budget: EpsilonBudget::new(EPSILON_MAX),
         }
     }
 
     pub fn push(&mut self, raw: f64) -> Result<(), String> {
+        // [H6] Cannot push after window is closed
+        if self.state != WindowState::Open {
+            return Err("Window closed — push rejected".to_string());
+        }
         if self.signals.len() >= MAX_BUFFER_SIGNALS {
             return Err("Requete invalide".to_string());
         }
@@ -139,6 +149,8 @@ impl AncreBuffer {
             return Err(format!("K={} < K_MIN={}", k, K_MIN));
         }
 
+        // [H6] Close window — K_MIN validated
+        self.state = WindowState::Closed;
         let mut vals: Vec<f64> = self.signals.iter().map(|s| s.value()).collect();
 
         // Moyenne tronquee
@@ -158,6 +170,7 @@ impl AncreBuffer {
         // Bruit Laplace Central DP
         let noisy = (mean + laplace_noise_v07(scale, &mut SecureRng::new())).clamp(0.0, 1.0);
         self.signals.clear();
+        self.state = WindowState::Open; // Reset for next window
         Ok(noisy)
     }
 
