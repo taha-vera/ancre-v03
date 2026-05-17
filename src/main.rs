@@ -11,7 +11,7 @@ use std::time::{Instant, Duration};
 // Invariants VERA — NON MODIFIABLES
 // ─────────────────────────────────────────────
 const K_MIN: usize = 100;
-const EPSILON_SERVER: f64 = 0.5;  // Central DP — seul epsilon
+const EPSILON_SERVER: f64 = 0.5;  // Central DP — single epsilon for server-side noise
 const EPSILON_MAX: f64 = 1.5;     // 3 agregations max
 const MAX_BUFFER_SIGNALS: usize = 10_000;
 const MAX_NONCES: usize = 100_000;
@@ -19,8 +19,8 @@ const NONCE_TTL_SECS: u64 = 300;
 const TRIM_FRACTION: f64 = 0.1;
 
 // ─────────────────────────────────────────────
-// F_new1 FIX — laplace_noise sans signum(0.0)
-// Central DP — bruit cote serveur uniquement
+// F_new1 FIX — laplace_noise without signum(0.0) edge case
+// Central DP — server-side noise only
 // ─────────────────────────────────────────────
 
 fn laplace_noise(scale: f64) -> f64 {
@@ -30,7 +30,7 @@ fn laplace_noise(scale: f64) -> f64 {
         v
     };
     let safe = (1.0 - 2.0 * u.abs()).max(f64::MIN_POSITIVE);
-    // F_new1 FIX : eviter signum(0.0) = 0 en IEEE 754
+    // F_new1 FIX: avoid signum(0.0) = 0 in IEEE 754
     let sign = if u >= 0.0 { 1.0_f64 } else { -1.0_f64 };
     -scale * sign * safe.ln()
 }
@@ -136,7 +136,7 @@ impl AncreBuffer {
         if self.signals.len() >= MAX_BUFFER_SIGNALS {
             return Err("Requete invalide".to_string());
         }
-        // Central DP : pas de bruit ici — signal brut valide
+        // Central DP: no noise here — raw validated signal
         let signal = BoundedSignal::new(raw)?;
         self.signals.push(signal);
         Ok(())
@@ -162,12 +162,12 @@ impl AncreBuffer {
         let sensitivity = 1.0 / k_eff;
         let scale = sensitivity / EPSILON_SERVER;
 
-        // Depense du budget APRES le check K_MIN
+        // Budget spent AFTER K_MIN check
         // Si K < K_MIN, on retourne Err AVANT cette ligne → budget intact
         // Si spend() echoue → budget non consomme (Err sans mutation)
         self.budget.spend(EPSILON_SERVER)?;
 
-        // Bruit Laplace Central DP
+        // Central DP Laplace noise
         let noisy = (mean + laplace_noise_v07(scale, &mut SecureRng::new())).clamp(0.0, 1.0);
         self.signals.clear();
         self.state = WindowState::Open; // Reset for next window
@@ -272,7 +272,7 @@ impl TtlNonceCache {
 // ─────────────────────────────────────────────
 // device_id — SHA-256 avec sel de session
 // Note : troncature 64 bits — collision theorique a 2^32
-// Acceptable pour quota de session, pas pour auth forte
+// Acceptable for session quota, not strong authentication
 // ─────────────────────────────────────────────
 
 pub fn derive_device_id(credential: &[u8], session_salt: u64) -> u64 {
@@ -332,7 +332,7 @@ impl SecureBufferV2 {
         let count = self.device_counts.entry(device_id).or_insert(0);
         // [H1] One signal per device per window
             if *count >= self.max_per_device {
-            return Err("Device quota atteint".to_string());
+            return Err("Device quota reached".to_string());
         }
         *count += 1;
 
@@ -478,7 +478,7 @@ mod tests {
         assert!(result.is_err(), "4e agregation doit echouer");
     }
 
-    // F_new1 — signum fix
+    // F_new1 — signum edge case fix
     #[test]
     fn laplace_noise_never_zero() {
         // Verifie que laplace_noise ne produit pas 0.0 systematiquement
