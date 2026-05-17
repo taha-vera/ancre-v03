@@ -116,7 +116,7 @@ enum WindowState { Open, Closed, Aggregated }
 pub struct AncreBuffer {
     state: WindowState,
     pub signals: Vec<BoundedSignal>,
-    budget: EpsilonBudget,
+    budget: EpsilonBudgetExact, // [PROVEN] exact u64 arithmetic, no float rounding
 }
 
 impl AncreBuffer {
@@ -124,7 +124,7 @@ impl AncreBuffer {
         Self {
             signals: Vec::with_capacity(MAX_BUFFER_SIGNALS),
             state: WindowState::Open,
-            budget: EpsilonBudget::new(EPSILON_MAX),
+            budget: EpsilonBudgetExact::new(EPSILON_MAX),
         }
     }
 
@@ -755,9 +755,16 @@ impl EpsilonBudgetExact {
         self.epsilon_used += amount_u;
         Ok(())
     }
+    pub fn remaining(&self) -> f64 {
+        self.remaining_f64()
+    }
     pub fn remaining_f64(&self) -> f64 {
         (self.epsilon_max - self.epsilon_used) as f64 / MICRO as f64
     }
+    pub fn used(&self) -> f64 {
+        self.epsilon_used as f64 / MICRO as f64
+    }
+
     pub fn is_exhausted(&self) -> bool {
         self.epsilon_used >= self.epsilon_max
     }
