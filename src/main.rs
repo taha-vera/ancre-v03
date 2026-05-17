@@ -305,7 +305,7 @@ impl SecureBufferV2 {
             policy,
             nonces: TtlNonceCache::new(NONCE_TTL_SECS, MAX_NONCES),
             device_counts: HashMap::new(),
-            max_per_device: 30,
+            max_per_device: 1, // H1: one signal per SIM per window
             session_salt: OsRng.gen::<u64>(),
             aggregation_count: 0,
         }
@@ -1009,9 +1009,10 @@ mod q10_tests {
         let mut buf = SecureBufferV2::new(policy);
         let cred = b"device_A";
 
-        // Push 5 signaux — quota device_A = 5
+        // Push 5 signaux — 5 devices différents (H1: max_per_device=1)
         for i in 0..5 {
-            buf.push(0.5, i as u64, cred).unwrap();
+            let cred_i = format!("device_{}", i);
+            buf.push(0.5, i as u64, cred_i.as_bytes()).unwrap();
         }
 
         let salt_before = buf.session_salt;
